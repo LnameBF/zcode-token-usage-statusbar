@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -292,6 +293,31 @@ class PendingAsarTests(unittest.TestCase):
         after = self.asar.stat()
         self.assertEqual(stat.S_IMODE(after.st_mode), 0o644)
         self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
+
+    def test_sweep_stale_stage_files_removes_only_aged_stage_files(self):
+        aged = self.asar.parent / (self.pi.TMP.name + ".old1234.stage")
+        aged.write_bytes(b"stale")
+        fresh = self.asar.parent / (self.pi.TMP.name + ".new5678.stage")
+        fresh.write_bytes(b"fresh")
+        sidecar_shape = self.asar.parent / (self.pi.TMP.name + ".json")
+        sidecar_shape.write_bytes(b"{}")
+        old = time.time() - self.pi.STALE_STAGE_SECONDS - 5
+        os.utime(aged, (old, old))
+        self.pi._sweep_stale_stage_files()
+        self.assertFalse(aged.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(sidecar_shape.exists())
+
+    def test_install_sweeps_orphan_stage_left_by_killed_repack(self):
+        # 重打包进程被杀（如 SessionStart hook 超时）后 finally 不执行：孤儿 stage
+        # 要在下一次安装入口被清掉（issue #191），且不影响本次安装照常完成。
+        orphan = self.asar.parent / (self.pi.TMP.name + ".deadbeef.stage")
+        orphan.write_bytes(b"\x00" * 16)
+        old = time.time() - self.pi.STALE_STAGE_SECONDS - 5
+        os.utime(orphan, (old, old))
+        self.assertTrue(self.pi.install())
+        self.assertFalse(orphan.exists())
+        self.assertTrue(self.pi.injected_state())
 
     def test_failed_install_syntax_cannot_be_manually_finalized(self):
         original = self.asar.read_bytes()

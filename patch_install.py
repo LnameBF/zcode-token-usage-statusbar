@@ -356,6 +356,26 @@ def cleanup_legacy_bak():
                 f"(failed to remove legacy backup {BAK}; delete it manually: {e})"))
 
 
+STALE_STAGE_SECONDS = 600
+
+
+def _sweep_stale_stage_files():
+    """清掉早于 STALE_STAGE_SECONDS 的 `app.asar.zusage.tmp.*.stage` 孤儿（issue #191）：
+    重打包进程被杀（如 SessionStart hook timeoutMs 到点）后 _prepare_tmp 的 finally
+    不会执行，stage 无人认领，单次最高约 375MB。刚生成的 stage 处在本次调用的移交
+    窗口内、由 _prepare_tmp 自身的 finally 负责，绝不能删。与 renderer_bridge 的
+    _sweep_stale_stages 同策略，但前缀不同（.zusage-bridge-*），互不覆盖。"""
+    now = time.time()
+    for stale in TMP.parent.glob(TMP.name + ".*.stage"):
+        try:
+            if now - stale.stat().st_mtime > STALE_STAGE_SECONDS:
+                stale.unlink()
+                print(L(f"已清理孤儿重打包残留 {stale.name}",
+                        f"Removed orphan repack leftover {stale.name}"))
+        except OSError:
+            pass
+
+
 # ---------- 待替换包的来源与身份 ----------
 
 class PendingTmpError(ValueError):
@@ -805,6 +825,7 @@ def _install(finalize=False, before_publish=None):
             cleanup_legacy_bak()
         return ok
     assert LOADER.exists(), L(f"loader 缺失：{LOADER}", f"loader missing: {LOADER}")
+    _sweep_stale_stage_files()   # 重打包前清掉上次被杀遗留的孤儿 stage（issue #191）
     if not target_writable():
         sudo_hint()
         return False
@@ -921,6 +942,7 @@ def remove():
 def _remove():
     """卸载：从当前 asar 剥离本工具注入行（不依赖备份，其它工具的注入行不受影响）。
     返回 True=已卸载/本就未注入，False=需人工处理（替换失败待收尾）。"""
+    _sweep_stale_stage_files()   # 与 _install 同款：卸载包重打包前清掉孤儿 stage（issue #191）
     try:
         _cancel_pending_install()  # 即使目标未注入，也不能让旧 install TMP 在 optout 后重注入。
         source = source_fingerprint(ASAR)
